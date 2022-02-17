@@ -242,6 +242,19 @@ fn jsonb_type(d: Datum<'_>) -> &'static str {
         _ => unreachable!("jsonb_type called on invalid datum {:?}", d),
     }
 }
+/// Casts between two record types by casting each element of `a` ("record1") using
+/// `cast_expr` and collecting the results into a new record ("record2").
+fn cast_record1_to_record2<'a>(
+    a: Datum,
+    cast_exprs: &'a Vec<MirScalarExpr>,
+    temp_storage: &'a RowArena,
+) -> Result<Datum<'a>, EvalError> {
+    let mut cast_datums = Vec::new();
+    for (el, cast_expr) in a.unwrap_list().iter().zip_eq(cast_exprs) {
+        cast_datums.push(cast_expr.eval(&[el], temp_storage)?);
+    }
+    Ok(temp_storage.make_datum(|packer| packer.push_list(cast_datums)))
+}
 
 /// Casts between two list types by casting each element of `a` ("list1") using
 /// `cast_expr` and collecting the results into a new list ("list2").
@@ -3330,6 +3343,10 @@ pub enum UnaryFunc {
     CastRecordToString {
         ty: ScalarType,
     },
+    CastRecord1ToRecord2 {
+        return_ty: ScalarType,
+        cast_exprs: Vec<MirScalarExpr>,
+    },
     CastArrayToString {
         ty: ScalarType,
     },
@@ -3765,6 +3782,9 @@ impl UnaryFunc {
             | CastListToString { ty }
             | CastMapToString { ty } => Ok(cast_collection_to_string(a, ty, temp_storage)),
             CastList1ToList2 { cast_expr, .. } => cast_list1_to_list2(a, &*cast_expr, temp_storage),
+            CastRecord1ToRecord2 { cast_exprs, .. } => {
+                cast_record1_to_record2(a, cast_exprs, temp_storage)
+            }
             CastInPlace { .. } => Ok(a),
             Ascii => Ok(ascii(a)),
             BitLengthString => bit_length(a.unwrap_str()),
@@ -4017,6 +4037,10 @@ impl UnaryFunc {
 
             CastInPlace { return_ty } => (return_ty.clone()).nullable(nullable),
 
+            CastRecord1ToRecord2 { return_ty, .. } => {
+                return_ty.default_embedded_value().nullable(false)
+            }
+
             CastList1ToList2 { return_ty, .. } => {
                 return_ty.default_embedded_value().nullable(false)
             }
@@ -4257,7 +4281,7 @@ impl UnaryFunc {
             TimezoneTime { .. } => false,
             TimezoneTimestampTz(_) => false,
             TimezoneTimestamp(_) => false,
-            CastList1ToList2 { .. } | CastInPlace { .. } => false,
+            CastList1ToList2 { .. } | CastRecord1ToRecord2 { .. } | CastInPlace { .. } => false,
             JsonbTypeof | JsonbStripNulls | JsonbPretty | ListLength => false,
             ExtractInterval(_)
             | ExtractTime(_)
@@ -4513,6 +4537,7 @@ impl UnaryFunc {
             CastJsonbToBool => f.write_str("jsonbtobool"),
             CastJsonbToNumeric(_) => f.write_str("jsonbtonumeric"),
             CastRecordToString { .. } => f.write_str("recordtostr"),
+            CastRecord1ToRecord2 { .. } => f.write_str("record1torecord2"),
             CastArrayToString { .. } => f.write_str("arraytostr"),
             CastListToString { .. } => f.write_str("listtostr"),
             CastList1ToList2 { .. } => f.write_str("list1tolist2"),
